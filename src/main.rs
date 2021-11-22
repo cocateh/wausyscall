@@ -1,11 +1,10 @@
 use std::env;
 use std::str;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::path::Path;
 use std::mem::size_of;
 use regex::Regex;
-use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -18,12 +17,9 @@ enum Error {
     InvalidCoffMagic,
     SeekErr(&'static str, std::io::Error),
     UnsupportedCoffMachine(u16),
-    Utf8Conversion(std::str::Utf8Error),
-    NoDll,
     InvalidOptionalMagic,
     InvalidBitness,
     OffsetNotFound,
-    IntegerOverflow,
 }
 
 const DOS_MAGIC: &'static [u8; 2] = b"MZ";
@@ -31,13 +27,13 @@ const DOS_MAGIC: &'static [u8; 2] = b"MZ";
 const COFF_X86_MACHINE: u16 = 0x014c;
 const COFF_X64_MACHINE: u16 = 0x8664;
 
-const DATA_DIRECTORIES: usize = 16;
+// const DATA_DIRECTORIES: usize = 16;
 
 const IMAGE_NT_OPTIONAL_HDR32_MAGIC: u16 = 0x010b;
 const IMAGE_NT_OPTIONAL_HDR64_MAGIC: u16 = 0x020b;
 
 // COFF header characteristics
-const IMAGE_FILE_DLL: u16 = 0x2000;
+// const IMAGE_FILE_DLL: u16 = 0x2000;
 
 macro_rules! consume {
     ($reader:expr) => {{
@@ -76,13 +72,6 @@ macro_rules! native_consume {
                 .map(|x| x as u64),
         }
     }};
-}
-
-fn rebase_address(addr: u32, current_base: u32, new_base: u32) -> Result<u32> {
-    addr.checked_sub(current_base)
-        .ok_or(Error::IntegerOverflow)?
-        .checked_add(new_base)
-        .ok_or(Error::IntegerOverflow)
 }
 
 #[derive(Debug)]
@@ -135,7 +124,7 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     let _sym_ptr = typed_consume!(reader, u32, "PointerToSymbolTable")?;
     let _sym_count = typed_consume!(reader, u32, "NumberOfSymbols")?;
     let _opt_size = typed_consume!(reader, u16, "SizeOfOptionalHeader")?;
-    let flags = typed_consume!(reader, u16, "Characteristics")?;
+    let _flags = typed_consume!(reader, u16, "Characteristics")?;
     /*
     if u16::from(flags ^ IMAGE_FILE_DLL) >> 16 as u16 != 0 {
         println!("{:x}", flags);
@@ -144,7 +133,7 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     */
 
     // COFF standard optional header
-    let opt_header_off = reader.stream_position()
+    let _opt_header_off = reader.stream_position()
         .map_err(Error::FileSeek)?;
 
     let coff_magic = typed_consume!(reader, u16, "Magic")?;
@@ -181,19 +170,26 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     let _chksum = typed_consume!(reader, u32, "CheckSum")?;
     let _subsys = typed_consume!(reader, u16, "Subsystem")?;
     let _dllflags = typed_consume!(reader, u16, "DllCharacteristics")?;
-    let _stk_res_count = native_consume!(reader, bitness, "SizeOfStackReserve")?;
-    let _stk_cmt_count = native_consume!(reader, bitness, "SizeOfStackCommit")?;
-    let _heap_res_count = native_consume!(reader, bitness, "SizeOfHeapReserve")?;
-    let _heap_res_count = native_consume!(reader, bitness, "SizeOfHeapCommit")?;
+    let _stk_res_count = native_consume!(reader, bitness,
+                                         "SizeOfStackReserve")?;
+    let _stk_cmt_count = native_consume!(reader, bitness,
+                                         "SizeOfStackCommit")?;
+    let _heap_res_count = native_consume!(reader, bitness,
+                                          "SizeOfHeapReserve")?;
+    let _heap_res_count = native_consume!(reader, bitness,
+                                          "SizeOfHeapCommit")?;
     let _ldrflags = typed_consume!(reader, u32, "LoaderFlags")?;
     let _size_rva_count = typed_consume!(reader, u32, "NumberOfRvaAndSizes")?;
 
     // Data directories
     // Export directory
     let export_rvaddr = typed_consume!(reader, u32, "Export Dir vaddr")?;
-    let export_size = typed_consume!(reader, u32, "Export Dir size")?;
+    let _export_size = typed_consume!(reader, u32, "Export Dir size")?;
 
     reader.seek(SeekFrom::Current(8 * (16 - 1)))
+        .map_err(Error::FileSeek)?;
+
+    let _sections_offset = reader.stream_position()
         .map_err(Error::FileSeek)?;
 
     // Find section containing export data
@@ -204,18 +200,30 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     let mut text_off: u32 = 0;
     for _ in 0..section_count {
         let name_bytes = consume!(reader, 8, "Section name")?;
-        let section_name = name_bytes.iter().map(|&x| x as char)
+        let mut section_name = name_bytes.iter().map(|&x| x as char)
             .collect::<String>();
+
+        // Remove trailing null bytes
+        section_name.retain(|c| c != (0x00 as char));
+
         let _virt_size = typed_consume!(reader, u32, "Section VirtualSize")?;
         let virt_addr = typed_consume!(reader, u32, "Section VirtualAddr")?;
-        let raw_data_size = typed_consume!(reader, u32, "Section RawDataSize")?;
-        let raw_data_ptr = typed_consume!(reader, u32, "Section PointerToRawData")?;
-        let _reloc_ptr = typed_consume!(reader, u32, "Section PointerToRelocations")?;
-        let _linum_ptr = typed_consume!(reader, u32, "Section PointerToLinenumbers")?;
-        let _reloc_count = typed_consume!(reader, u16, "Section NumberOfRelocations")?;
-        let _linum_count = typed_consume!(reader, u16, "Section NumberOfLinenumbers")?;
-        let _secti_flags = typed_consume!(reader, u32, "Section Characteristics")?;
+        let raw_data_size = typed_consume!(reader, u32,
+                                           "Section RawDataSize")?;
+        let raw_data_ptr = typed_consume!(reader, u32,
+                                          "Section PointerToRawData")?;
+        let _reloc_ptr = typed_consume!(reader, u32,
+                                        "Section PointerToRelocations")?;
+        let _linum_ptr = typed_consume!(reader, u32,
+                                        "Section PointerToLinenumbers")?;
+        let _reloc_count = typed_consume!(reader, u16,
+                                          "Section NumberOfRelocations")?;
+        let _linum_count = typed_consume!(reader, u16,
+                                          "Section NumberOfLinenumbers")?;
+        let _secti_flags = typed_consume!(reader, u32,
+                                          "Section Characteristics")?;
         if section_name == ".text" {
+            // Finding .text section to resolve offsets to function exports
             text_vaddr = virt_addr;
             text_off = raw_data_ptr;
         }
@@ -225,13 +233,17 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
             // Section found
             // Calculcating file offset from relative virtual address
             export_entry_off = export_rvaddr - virt_addr + raw_data_ptr;
-            export_entry_off = rebase_address(export_rvaddr, virt_addr, raw_data_ptr)?;
             sect_vaddr = virt_addr;
             sect_raw_off = raw_data_ptr;
             break;
         }
     }
+
     if export_entry_off == 0 {
+        return Err(Error::OffsetNotFound);
+    }
+
+    if text_off == 0 {
         return Err(Error::OffsetNotFound);
     }
 
@@ -251,19 +263,20 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     let dir_rvnaddr = typed_consume!(reader, u32, "ExportDir AddressOfNames")?;
     let dir_rvoaddr = typed_consume!(reader, u32, "ExportDir AddressOfNameOrdinals")?;
 
-    let mut syscalls: HashMap<String, &[u32; 2]> = HashMap::new();
     let names_off = dir_rvnaddr - sect_vaddr + sect_raw_off;
     let ord_off = dir_rvoaddr - sect_vaddr + sect_raw_off;
     let addr_off = dir_rvfaddr - sect_vaddr + sect_raw_off;
+
+    // Reading Export tables: AddressOfNames, etc...
     reader.seek(SeekFrom::Start(names_off as u64))
         .map_err(Error::FileSeek)?;
 
-    let syscall_regex = Regex::new("^Nt[A-Z][[:alpha:]]+").unwrap();
     let mut name_vec: Vec<String> = Vec::new();
     let mut ord_vec: Vec<u16> = Vec::new();
     let mut fun_vec: Vec<u32> = Vec::new();
 
-    for i in 0..dir_nnum {
+    // AddressOfNames
+    for _ in 0..dir_nnum {
         let mut buf: Vec<u8> = Vec::new();
         let mut byte: u8;
         let str_addr = typed_consume!(reader, u32, "String Address")?;
@@ -286,23 +299,47 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
             .map_err(Error::FileSeek)?;
     }
 
+    // AddressOfNameOrdinals
     reader.seek(SeekFrom::Start(ord_off as u64))
         .map_err(Error::FileSeek)?;
 
-    for i in 0..dir_nnum {
+    for _ in 0..dir_nnum {
         let ord = typed_consume!(reader, u16, "Name Ordinal")?;
         ord_vec.push(ord);
     }
 
+    // AddressOfFunctions
     reader.seek(SeekFrom::Start(addr_off as u64))
         .map_err(Error::FileSeek)?;
 
-    for ord in ord_vec.iter() {
-        reader.seek(SeekFrom::Start((addr_off + (*ord as u32) * 4) as u64))
-            .map_err(Error::FileSeek)?;
-
+    for _ in 0..dir_fnum {
         let fun_addr = typed_consume!(reader, u32, "Export address")?;
         fun_vec.push(fun_addr);
+    }
+
+    // Read exported names and match to syscall function naming format
+    let syscall_regex = Regex::new("^Nt[A-Z][[:alpha:]]+").unwrap();
+    for i in 0..name_vec.len() {
+        let name = &name_vec[i];
+        let ord: usize = ord_vec[i].into();
+        let fun: u64 = fun_vec[ord].into();
+        let fun_off = fun - text_vaddr as u64 + text_off as u64;
+        if syscall_regex.is_match(name) {
+            reader.seek(SeekFrom::Start(fun_off))
+                .map_err(Error::FileSeek)?;
+
+            /*
+             * x86 windows syscall functions are constructed in format
+             * mov r10, rcx ;; 3 byte instruction
+             * mov eax, {syscall number} ;; 5 bytes instruction
+             *
+             * reading 4 bytes removes these unnecessary opcodes and leaves us
+             * with 32 bit syscall number to read
+             */
+            let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
+            let syscall_num = typed_consume!(reader, u32, "Syscall number")?;
+            println!("{} => {:#x}", name, syscall_num);
+        }
     }
 
     Ok(())
@@ -310,10 +347,16 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
+    let ntdll_path: String;
 
-    if args.len() < 2 {
-        println!("err: usage {} <path to ntdll>", args[0]);
+    if env::consts::OS == "windows" {
+        ntdll_path = String::from("C:\\Windows\\System32\\ntdll.dll");
+    } else {
+        if args.len() < 2 {
+            println!("err: usage {} <path to ntdll>", args[0]);
+        }
+        ntdll_path = args[1].clone();
     }
 
-    read_ntdll(&args[1])
+    read_ntdll(&ntdll_path)
 }
