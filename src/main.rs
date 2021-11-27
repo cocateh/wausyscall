@@ -5,6 +5,7 @@ use std::fs::File;
 use std::path::Path;
 use std::mem::size_of;
 use regex::Regex;
+use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -91,7 +92,8 @@ impl TryFrom<u16> for Bitness {
     }
 }
 
-fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
+fn read_ntdll(file_path: impl AsRef<Path>,
+              search_pattern: Option<String>) -> Result<()> {
     let mut reader = File::open(file_path).map_err(Error::FileOpen)?;
     
     if &consume!(reader, 2, "e_magic")? != DOS_MAGIC {
@@ -117,7 +119,6 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
     let machine = typed_consume!(reader, u16, "COFF Machine")?;
     let bitness = Bitness::try_from(machine)
         .map_err(|_| Error::UnsupportedCoffMachine(machine))?;
-    //println!("{:?}", bitness);
 
     let section_count = typed_consume!(reader, u16, "NumberOfSections")?;
     let _time_stamp = typed_consume!(reader, u32, "TimeDateStamp")?;
@@ -251,17 +252,28 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
         .map_err(Error::FileSeek)?;
 
     // IMAGE_DIRECTORY_ENTRY_EXPORT
-    let _dir_flags = typed_consume!(reader, u32, "ExportDir Characteristics")?;
-    let _dir_time = typed_consume!(reader, u32, "ExportDir TimeDateStamp")?;
-    let _dir_maj = typed_consume!(reader, u16, "ExportDir MajorVersion")?;
-    let _dir_min = typed_consume!(reader, u16, "ExportDir MinorVersion")?;
-    let _dir_name = typed_consume!(reader, u32, "ExportDir Name")?;
-    let _dir_base = typed_consume!(reader, u32, "ExportDir Base")?;
-    let dir_fnum = typed_consume!(reader, u32, "ExportDir NumberOfFunctions")?;
-    let dir_nnum = typed_consume!(reader, u32, "ExportDir NumberOfNames")?;
-    let dir_rvfaddr = typed_consume!(reader, u32, "ExportDir AddressOfFunctions")?;
-    let dir_rvnaddr = typed_consume!(reader, u32, "ExportDir AddressOfNames")?;
-    let dir_rvoaddr = typed_consume!(reader, u32, "ExportDir AddressOfNameOrdinals")?;
+    let _dir_flags = typed_consume!(reader, u32,
+                                    "ExportDir Characteristics")?;
+    let _dir_time = typed_consume!(reader, u32,
+                                   "ExportDir TimeDateStamp")?;
+    let _dir_maj = typed_consume!(reader, u16,
+                                  "ExportDir MajorVersion")?;
+    let _dir_min = typed_consume!(reader, u16,
+                                  "ExportDir MinorVersion")?;
+    let _dir_name = typed_consume!(reader, u32,
+                                   "ExportDir Name")?;
+    let _dir_base = typed_consume!(reader, u32,
+                                   "ExportDir Base")?;
+    let dir_fnum = typed_consume!(reader, u32,
+                                  "ExportDir NumberOfFunctions")?;
+    let dir_nnum = typed_consume!(reader, u32,
+                                  "ExportDir NumberOfNames")?;
+    let dir_rvfaddr = typed_consume!(reader, u32,
+                                     "ExportDir AddressOfFunctions")?;
+    let dir_rvnaddr = typed_consume!(reader, u32,
+                                     "ExportDir AddressOfNames")?;
+    let dir_rvoaddr = typed_consume!(reader, u32,
+                                     "ExportDir AddressOfNameOrdinals")?;
 
     let names_off = dir_rvnaddr - sect_vaddr + sect_raw_off;
     let ord_off = dir_rvoaddr - sect_vaddr + sect_raw_off;
@@ -317,6 +329,8 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
         fun_vec.push(fun_addr);
     }
 
+    let mut syscall_map: HashMap<String, u32> = HashMap::new();
+
     // Read exported names and match to syscall function naming format
     let syscall_regex = Regex::new("^Nt[A-Z][[:alpha:]]+").unwrap();
     for i in 0..name_vec.len() {
@@ -338,8 +352,18 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
              */
             let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
             let syscall_num = typed_consume!(reader, u32, "Syscall number")?;
-            println!("{} => {:#x}", name, syscall_num);
+            syscall_map.insert(name.to_string(), syscall_num);
         }
+    }
+
+    for (name, number) in syscall_map.iter() {
+        // If specified, print only functions that match the search pattern
+        if let Some(ref val) = search_pattern {
+            if !name.contains(val) {
+                continue;
+            }
+        }
+        println!("{} => {:#x}", name, number);
     }
 
     Ok(())
@@ -347,16 +371,21 @@ fn read_ntdll(file_path: impl AsRef<Path>) -> Result<()>{
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let ntdll_path: String;
-
-    if env::consts::OS == "windows" {
-        ntdll_path = String::from("C:\\Windows\\System32\\ntdll.dll");
+    let mut ntdll_path: String = if env::consts::OS == "windows" {
+        String::from("C:\\Windows\\System32\\ntdll.dll")
     } else {
-        if args.len() < 2 {
-            println!("err: usage {} <path to ntdll>", args[0]);
-        }
+        String::new()
+    };
+
+    if args.len() < 2 && ntdll_path.is_empty() {
+        println!("err: usage {} <path to ntdll> (function name)", args[0]);
+        return Ok(());
+    } else if args.len() >= 2 && ntdll_path.is_empty() {
         ntdll_path = args[1].clone();
     }
 
-    read_ntdll(&ntdll_path)
+    let search_pattern = if args.len() >= 3 { Some(args[2].clone()) }
+                         else { None };
+
+    read_ntdll(&ntdll_path, search_pattern)
 }
