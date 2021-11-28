@@ -380,7 +380,7 @@ fn main() -> Result<()> {
     if args.len() < 2 && ntdll_path.is_empty() {
         println!("err: usage {} <path to ntdll> (function name)", args[0]);
         return Ok(());
-    } else if args.len() >= 2 && ntdll_path.is_empty() {
+    } else if args.len() >= 2 {
         ntdll_path = args[1].clone();
     }
 
