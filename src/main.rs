@@ -92,8 +92,9 @@ impl TryFrom<u16> for Bitness {
     }
 }
 
-fn read_ntdll(file_path: impl AsRef<Path>,
-              search_pattern: Option<String>) -> Result<()> {
+fn parse_syscalls(file_path: impl AsRef<Path>,
+              search_pattern: Option<String>,
+              print_errors: bool) -> Result<()> {
     let mut reader = File::open(file_path).map_err(Error::FileOpen)?;
     
     if &consume!(reader, 2, "e_magic")? != DOS_MAGIC {
@@ -363,29 +364,71 @@ fn read_ntdll(file_path: impl AsRef<Path>,
                 continue;
             }
         }
-        println!("{} => {:#x}", name, number);
+
+        /*
+         * Most syscalls are in range of 0x000 - 0x100 for ntoskrnl
+         * and 0x100 > && < 0x2000 for win32k.
+         * If number value is not in that range, the syscall function
+         * most likely doesn't follow the pattern described before.
+         */
+        if number.to_owned() >= 0x2000 {
+            println!("(likely erroneus) {} => {:#x}", name, number);
+        } else {
+            if print_errors == true {
+                continue;
+            }
+            println!("{} => {:#x}", name, number);
+        }
     }
 
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let mut ntdll_path: String = if env::consts::OS == "windows" {
+    let mut args: Vec<String> = env::args().collect();
+    let mut print_errors: bool = false;
+    let mut print_help: bool = false;
+    let mut file_path: String = if env::consts::OS == "windows" {
         String::from("C:\\Windows\\System32\\ntdll.dll")
     } else {
         String::new()
     };
 
-    if args.len() < 2 && ntdll_path.is_empty() {
-        println!("err: usage {} <path to ntdll> (function name)", args[0]);
+    args.retain(|x| {
+        if x == "--only-erroneus" {
+            print_errors = true;
+
+            // Discard from argument list
+            false
+        } else { true }
+    });
+
+    args.retain(|x| {
+        if x == "--help" {
+            print_help = true;
+
+            false
+        } else { true }
+    });
+
+    if (args.len() < 2 && file_path.is_empty()) || print_help {
+        println!(
+r#"usage: {} <path> (function name) [--only-erroneus]
+    <path>          - path to usermode dll containing syscall numbers,
+    like win32u.dll or ntdll.dll. On Windows, if not present, defaults to
+    "C:\Windows\system32\ntdll.dll". On different system, this argument is
+    required.
+    (function name) - If passed, prints only functions containing this string
+    and matching syscall regex.
+    --only-erroneus - Print only functions that are likely improperly parsed."#,
+    args[0]);
         return Ok(());
     } else if args.len() >= 2 {
-        ntdll_path = args[1].clone();
+        file_path = args[1].clone();
     }
 
     let search_pattern = if args.len() >= 3 { Some(args[2].clone()) }
                          else { None };
 
-    read_ntdll(&ntdll_path, search_pattern)
+    parse_syscalls(&file_path, search_pattern, print_errors)
 }
