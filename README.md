@@ -27,3 +27,9 @@ a path to the file should be provided.
 `Function name` argument is not required. When provided, it looks up syscall
 number for the specified function name, but then on Windows, providing
 a path to the dll is required.
+
+# Limitations
+
+Some of the functions which match to syscall regex, but are not syscalls,
+will return incorrect output. `--only-erroneus` flag tries to print out
+problematic functions, yet it is not 100% accurate.
