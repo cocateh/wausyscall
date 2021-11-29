@@ -1,6 +1,6 @@
 use std::env;
 use std::str;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, BufReader};
 use std::fs::File;
 use std::path::Path;
 use std::mem::size_of;
@@ -17,16 +17,17 @@ enum Error {
     InvalidDosMagic,
     InvalidCoffMagic,
     SeekErr(&'static str, std::io::Error),
-    UnsupportedCoffMachine(u16),
+    InvalidCoffMachine(u16),
     InvalidOptionalMagic,
-    InvalidBitness,
     OffsetNotFound,
 }
 
 const DOS_MAGIC: &'static [u8; 2] = b"MZ";
 
 const COFF_X86_MACHINE: u16 = 0x014c;
-const COFF_X64_MACHINE: u16 = 0x8664;
+const COFF_AMD64_MACHINE: u16 = 0x8664;
+const COFF_R4000_MACHINE: u16 = 0x166;
+const COFF_AARCH64_MACHINE: u16 = 0xAA64;
 
 // const DATA_DIRECTORIES: usize = 16;
 
@@ -75,27 +76,100 @@ macro_rules! native_consume {
     }};
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Machine {
+    X86,
+    AMD64,
+    // MIPSIII R4000
+    R4000,
+    AArch64,
+}
+
+impl TryFrom<u16> for Machine {
+    type Error = Error;
+    fn try_from(val: u16) -> Result<Self> {
+        match val {
+            COFF_X86_MACHINE     => Ok(Machine::X86),
+            COFF_AMD64_MACHINE   => Ok(Machine::AMD64),
+            COFF_R4000_MACHINE   => Ok(Machine::R4000),
+            COFF_AARCH64_MACHINE => Ok(Machine::AArch64),
+            _                    => Err(Error::InvalidCoffMachine(val)),
+        }
+    }
+}
+
+impl TryInto<u16> for Machine {
+    type Error = Error;
+    fn try_into(self) -> Result<u16> {
+        match self {
+            Machine::X86     => Ok(COFF_X86_MACHINE),
+            Machine::AMD64   => Ok(COFF_AMD64_MACHINE),
+            Machine::R4000   => Ok(COFF_R4000_MACHINE),
+            Machine::AArch64 => Ok(COFF_AARCH64_MACHINE),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Bitness {
     Bits64,
     Bits32,
 }
 
-impl TryFrom<u16> for Bitness {
+impl TryFrom<Machine> for Bitness {
     type Error = Error;
-    fn try_from(val: u16) -> Result<Self> {
+    fn try_from(val: Machine) -> Result<Self> {
         match val {
-            COFF_X86_MACHINE => Ok(Bitness::Bits32),
-            COFF_X64_MACHINE => Ok(Bitness::Bits64),
-            _ => Err(Error::InvalidBitness),
+            Machine::X86     => Ok(Bitness::Bits32),
+            Machine::AMD64   => Ok(Bitness::Bits64),
+            // MIPSIII was used in 32 bit mode
+            Machine::R4000   => Ok(Bitness::Bits32),
+            Machine::AArch64 => Ok(Bitness::Bits64),
         }
     }
+}
+
+fn read_aarch64_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * ARM Windows uses SVC instruction for syscalls and in contrast to
+     * linux, it uses the exception number in an instruction for syscalls,
+     * which requires us to use value mask on the instruction and then just
+     * align the bits correcly.
+     */
+    let svc_instruction = consume!(reader, 4, "SVC instruction")?;
+    let mut value_bytes = [0u8; 2];
+    value_bytes[0] = ((svc_instruction[1] & 0b11111) << 3) |
+                     ((svc_instruction[0] & 0b11100000) >> 5);
+    value_bytes[1] = ((svc_instruction[1] & 0b11100000) >> 5) |
+                     ((svc_instruction[2] & 0b11111) << 3);
+    Ok(u16::from_le_bytes(value_bytes))
+}
+
+fn read_r4000_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * I just couldn't find any MIPS Windows syscalls larger than 8 bytes
+     */
+    Ok(typed_consume!(reader, u8, "Syscall number")?.into())
+}
+
+fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * x86 windows syscall functions are constructed in format
+     * mov r10, rcx ;; 3 byte instruction
+     * mov eax, {syscall number} ;; 5 bytes instruction
+     *
+     * reading 4 bytes removes these unnecessary opcodes and leaves us
+     * with 32 bit syscall number to read
+     */
+    let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
+    Ok(typed_consume!(reader, u16, "Syscall number")?)
 }
 
 fn parse_syscalls(file_path: impl AsRef<Path>,
               search_pattern: Option<String>,
               print_errors: bool) -> Result<()> {
-    let mut reader = File::open(file_path).map_err(Error::FileOpen)?;
+    let mut reader =
+        BufReader::new(File::open(file_path).map_err(Error::FileOpen)?);
     
     if &consume!(reader, 2, "e_magic")? != DOS_MAGIC {
         return Err(Error::InvalidDosMagic);
@@ -117,9 +191,9 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
         return Err(Error::InvalidCoffMagic);
     }
 
-    let machine = typed_consume!(reader, u16, "COFF Machine")?;
-    let bitness = Bitness::try_from(machine)
-        .map_err(|_| Error::UnsupportedCoffMachine(machine))?;
+    let machine = Machine::try_from(typed_consume!(reader, u16,
+        "COFF Machine")?)?;
+    let bitness = Bitness::try_from(machine)?;
 
     let section_count = typed_consume!(reader, u16, "NumberOfSections")?;
     let _time_stamp = typed_consume!(reader, u32, "TimeDateStamp")?;
@@ -330,7 +404,7 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
         fun_vec.push(fun_addr);
     }
 
-    let mut syscall_map: HashMap<String, u32> = HashMap::new();
+    let mut syscall_map: HashMap<String, u16> = HashMap::new();
 
     // Read exported names and match to syscall function naming format
     let syscall_regex = Regex::new("^Nt[A-Z][[:alpha:]]+").unwrap();
@@ -340,19 +414,22 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
         let fun: u64 = fun_vec[ord].into();
         let fun_off = fun - text_vaddr as u64 + text_off as u64;
         if syscall_regex.is_match(name) {
+            let syscall_num: u16;
             reader.seek(SeekFrom::Start(fun_off))
                 .map_err(Error::FileSeek)?;
 
-            /*
-             * x86 windows syscall functions are constructed in format
-             * mov r10, rcx ;; 3 byte instruction
-             * mov eax, {syscall number} ;; 5 bytes instruction
-             *
-             * reading 4 bytes removes these unnecessary opcodes and leaves us
-             * with 32 bit syscall number to read
-             */
-            let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
-            let syscall_num = typed_consume!(reader, u32, "Syscall number")?;
+            if let Machine::X86 = machine {
+                syscall_num = read_x86_syscall(&mut reader)?;
+            } else if let Machine::AMD64 = machine {
+                syscall_num = read_x86_syscall(&mut reader)?;
+            } else if let Machine::R4000 = machine {
+                syscall_num = read_r4000_syscall(&mut reader)?;
+            } else if let Machine::AArch64 = machine {
+                syscall_num = read_aarch64_syscall(&mut reader)?;
+            } else {
+                return Err(Error::InvalidCoffMachine(machine.try_into()?))
+            }
+
             syscall_map.insert(name.to_string(), syscall_num);
         }
     }
@@ -366,7 +443,7 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
         }
 
         /*
-         * Most syscalls are in range of 0x000 - 0x100 for ntoskrnl
+         * Most syscalls are in range of 0x000 - 0x200 for ntoskrnl
          * and 0x100 > && < 0x2000 for win32k.
          * If number value is not in that range, the syscall function
          * most likely doesn't follow the pattern described before.
