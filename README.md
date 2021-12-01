@@ -3,11 +3,6 @@
 `wausyscall` is a tool for extracting Windows syscall numbers from usermode
 syscall wrapper dlls such as ntdll.dll or win32u.dll
 
-It supports only x86 Windows but can be easily ported to other architectures,
-due to PE file portability, if provided with length of instructions prior to
-syscall number move instruction, given that syscall wrapper function format is
-the same.
-
 # Usage & Installation
 
 `cargo install --path .`
@@ -31,5 +26,6 @@ a path to the dll is required.
 # Limitations
 
 Some of the functions which match to syscall regex, but are not syscalls,
-will return incorrect output. `--only-erroneus` flag tries to print out
+will return incorrect output.
+`--only-erroneus` flag tries to print out
 problematic functions, yet it is not 100% accurate.
