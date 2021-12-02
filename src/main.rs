@@ -154,7 +154,7 @@ fn read_r4000_syscall(mut reader: impl Read) -> Result<u16> {
 
 fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
     /*
-     * x86 windows syscall functions are constructed in format
+     * Windows 8 <= syscall functions are constructed in format
      * mov r10, rcx ;; 3 byte instruction
      * mov eax, {syscall number} ;; 5 bytes instruction
      *
@@ -162,6 +162,25 @@ fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
      * with 32 bit syscall number to read
      */
     let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
+    Ok(typed_consume!(reader, u16, "Syscall number")?)
+}
+
+fn read_old_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * Windows XP up to 7 used a different syscall convention.
+     * Syscall functions called a KiFastSystemCall or KiFastSystemCallRet
+     * which does sysenter. Calling convention for syscalls is __stdcall
+     * for arguments and eax for syscall numbers.
+     *
+     * NtTerminateProcess:
+     * mov eax, 101h ;; 5 byte instruction
+     * mov edx, KiFastSystemCall
+     * call [edx]
+     *
+     * Windows 2000 >= doesn't use KiFastSystemCall in favour of int 2eh
+     * but this parsing format is basically the same
+     */
+    let _opcodes = consume!(reader, 1, "Useless opcodes")?;
     Ok(typed_consume!(reader, u16, "Syscall number")?)
 }
 
@@ -234,8 +253,8 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
     let _image_base = native_consume!(reader, bitness, "ImageBase")?;
     let _sect_align = typed_consume!(reader, u32, "SectionAlignment")?;
     let _file_align = typed_consume!(reader, u32, "FileAlignment")?;
-    let _maj_os_ver = typed_consume!(reader, u16, "MajorOsVersion")?;
-    let _min_os_ver = typed_consume!(reader, u16, "MinorOsVersion")?;
+    let maj_os_ver = typed_consume!(reader, u16, "MajorOsVersion")?;
+    let min_os_ver = typed_consume!(reader, u16, "MinorOsVersion")?;
     let _maj_img_ver = typed_consume!(reader, u16, "MajorImageVersion")?;
     let _maj_img_ver = typed_consume!(reader, u16, "MinorImageVersion")?;
     let _maj_sub_ver = typed_consume!(reader, u16, "MajorSubsystemVersion")?;
@@ -419,9 +438,17 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
                 .map_err(Error::FileSeek)?;
 
             if let Machine::X86 = machine {
-                syscall_num = read_x86_syscall(&mut reader)?;
+                if maj_os_ver == 6 && min_os_ver >= 2 || maj_os_ver > 6 {
+                    syscall_num = read_x86_syscall(&mut reader)?;
+                } else {
+                    syscall_num = read_old_syscall(&mut reader)?;
+                }
             } else if let Machine::AMD64 = machine {
-                syscall_num = read_x86_syscall(&mut reader)?;
+                if maj_os_ver == 6 && min_os_ver >= 2 || maj_os_ver > 6 {
+                    syscall_num = read_x86_syscall(&mut reader)?;
+                } else {
+                    syscall_num = read_old_syscall(&mut reader)?;
+                }
             } else if let Machine::R4000 = machine {
                 syscall_num = read_r4000_syscall(&mut reader)?;
             } else if let Machine::AArch64 = machine {
