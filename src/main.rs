@@ -4,8 +4,8 @@ use std::io::{Read, Seek, SeekFrom, BufReader};
 use std::fs::File;
 use std::path::Path;
 use std::mem::size_of;
-use regex::Regex;
 use std::collections::HashMap;
+use regex::Regex;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -37,19 +37,18 @@ const IMAGE_NT_OPTIONAL_HDR64_MAGIC: u16 = 0x020b;
 // COFF header characteristics
 // const IMAGE_FILE_DLL: u16 = 0x2000;
 
+/// Consume bytes from $reader.
 macro_rules! consume {
     ($reader:expr) => {{
         let mut buf = [0u8; 1];
         $reader.read_exact(&mut buf).map(|_| buf[0])
             .map_err(|x| Error::FileRead("eating bytes", x))
     }};
-
     ($reader:expr, $field:expr) => {{
         let mut buf = [0u8; 1];
         $reader.read_exact(&mut buf).map(|_| buf)
             .map_err(|x| Error::FileRead($field, x))
     }};
-
     ($reader:expr, $size:expr, $field:expr) => {{
         let mut buf = [0u8; $size];
         $reader.read_exact(&mut buf).map(|_| buf)
@@ -57,6 +56,7 @@ macro_rules! consume {
     }};
 }
 
+/// Consume size_of<$type> bytes from $reader and return $type.
 macro_rules! typed_consume {
     ($reader:expr, $type:ty, $field:expr) => {{
         let mut buf = [0u8; size_of::<$type>()];
@@ -66,6 +66,7 @@ macro_rules! typed_consume {
     }};
 }
 
+/// Consume either 4 or 8 bytes and return u32 or u64 depending on target CPU.
 macro_rules! native_consume {
     ($reader:expr, $bitness:ident, $field:expr) => {{
         match $bitness {
@@ -80,7 +81,7 @@ macro_rules! native_consume {
 enum Machine {
     X86,
     AMD64,
-    // MIPSIII R4000
+    /// MIPSIII R4000
     R4000,
     AArch64,
 }
@@ -145,13 +146,17 @@ fn read_aarch64_syscall(mut reader: impl Read) -> Result<u16> {
     Ok(u16::from_le_bytes(value_bytes))
 }
 
+/// Read MIPS R4000 syscall
 fn read_r4000_syscall(mut reader: impl Read) -> Result<u16> {
     /*
-     * I just couldn't find any MIPS Windows syscalls larger than 8 bytes
+     * Windows uses little endian on every platform,
+     * and MIPS encodes immediate instructions to have 16 byte immediate
+     * operands.
      */
-    Ok(typed_consume!(reader, u8, "Syscall number")?.into())
+    Ok(typed_consume!(reader, u16, "Syscall number")?)
 }
 
+/// Read x86 syscall for Windows 8 and higher
 fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
     /*
      * Windows 8 <= syscall functions are constructed in format
@@ -165,6 +170,7 @@ fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
     Ok(typed_consume!(reader, u16, "Syscall number")?)
 }
 
+/// Read x86 syscall for Windows XP and lower
 fn read_old_syscall(mut reader: impl Read) -> Result<u16> {
     /*
      * Windows XP up to 7 used a different syscall convention.
@@ -184,6 +190,13 @@ fn read_old_syscall(mut reader: impl Read) -> Result<u16> {
     Ok(typed_consume!(reader, u16, "Syscall number")?)
 }
 
+/// Read syscalls from file at file_path.
+///
+/// If search_pattern is not None, print only syscalls containing specified
+/// string.
+///
+/// If print_errors is true, print only syscalls that are likely to
+/// be incorrectly parsed.
 fn parse_syscalls(file_path: impl AsRef<Path>,
               search_pattern: Option<String>,
               print_errors: bool) -> Result<()> {
