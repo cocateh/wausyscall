@@ -28,6 +28,9 @@ const COFF_X86_MACHINE: u16 = 0x014c;
 const COFF_AMD64_MACHINE: u16 = 0x8664;
 const COFF_R4000_MACHINE: u16 = 0x166;
 const COFF_AARCH64_MACHINE: u16 = 0xAA64;
+const COFF_ITANIUM_MACHINE: u16 = 0x0200;
+const COFF_POWERPC_MACHINE: u16 = 0x01f0;
+const COFF_ALPHA_MACHINE: u16 = 0x0184;
 
 // const DATA_DIRECTORIES: usize = 16;
 
@@ -84,6 +87,9 @@ enum Machine {
     /// MIPSIII R4000
     R4000,
     AArch64,
+    Alpha,
+    PowerPC,
+    Itanium,
 }
 
 impl TryFrom<u16> for Machine {
@@ -94,6 +100,9 @@ impl TryFrom<u16> for Machine {
             COFF_AMD64_MACHINE   => Ok(Machine::AMD64),
             COFF_R4000_MACHINE   => Ok(Machine::R4000),
             COFF_AARCH64_MACHINE => Ok(Machine::AArch64),
+            COFF_POWERPC_MACHINE => Ok(Machine::PowerPC),
+            COFF_ALPHA_MACHINE   => Ok(Machine::Alpha),
+            COFF_ITANIUM_MACHINE => Ok(Machine::Itanium),
             _                    => Err(Error::InvalidCoffMachine(val)),
         }
     }
@@ -107,6 +116,9 @@ impl TryInto<u16> for Machine {
             Machine::AMD64   => Ok(COFF_AMD64_MACHINE),
             Machine::R4000   => Ok(COFF_R4000_MACHINE),
             Machine::AArch64 => Ok(COFF_AARCH64_MACHINE),
+            Machine::Alpha   => Ok(COFF_ALPHA_MACHINE),
+            Machine::PowerPC => Ok(COFF_POWERPC_MACHINE),
+            Machine::Itanium => Ok(COFF_ITANIUM_MACHINE),
         }
     }
 }
@@ -121,28 +133,83 @@ impl TryFrom<Machine> for Bitness {
     type Error = Error;
     fn try_from(val: Machine) -> Result<Self> {
         match val {
-            Machine::X86     => Ok(Bitness::Bits32),
             Machine::AMD64   => Ok(Bitness::Bits64),
-            // MIPSIII was used in 32 bit mode
-            Machine::R4000   => Ok(Bitness::Bits32),
             Machine::AArch64 => Ok(Bitness::Bits64),
+            Machine::Itanium => Ok(Bitness::Bits64),
+
+            // Windows used 32 bit exclusively until Windows XP
+            Machine::R4000   => Ok(Bitness::Bits32),
+            Machine::Alpha   => Ok(Bitness::Bits32),
+            Machine::PowerPC => Ok(Bitness::Bits32),
+            Machine::X86     => Ok(Bitness::Bits32),
         }
     }
 }
 
+/// Read Alpha syscall
+fn read_alpha_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * lda $0, {syscall number}($31) ;; r32 is a zero register
+     * call_pal callsys              ;; somekind of syscall invkoing mechanism
+     */
+    typed_consume!(reader, u16, "Syscall number")
+}
+
+/// Read PowerPC syscall
+fn read_ppc_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * PowerPC uses syscall wrappers, cause there is no simple way of
+     * making syscalls.
+     *
+     * Example:
+     * addi r0, 0, {syscall number} ;; or li r0, {syscall number}
+     * b syscall_wrapper
+     */
+    typed_consume!(reader, u16, "Syscall number")
+}
+
+/// Read Itanium syscall
+fn read_itanium_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * Itanium is hella weird.
+     * So because of weird instruction encoding and operand sizes we have to
+     * fuck around. 
+     * mov takes a 22 bit immediate which we want parse into sane 16 bit,
+     * so we don't even have to read the whole bundle or even a whole slot.
+     *
+     * Example syscall (im trusting IDA output):
+     * mov r8 = {syscall number}
+     * movl r2 = 0xE0000000FFA0020;; # move KiFastSystemCall address
+     * nop.m 0                       # padding?
+     * mov b6 = r2                   # move address to branch register
+     * br.few b6;;                   # branch off
+     */
+    let bundle = consume!(reader, 5, "Itanium instruction bundle")?;
+    let mut value_bytes = [0u8; 2];
+    value_bytes[0] = ((bundle[1] & 0b00000011) << 6) |
+                     ((bundle[2] & 0b11111100) >> 2);
+    value_bytes[1] = ((bundle[2] & 0b00000011) << 6) |
+                     ((bundle[3] & 0b11111100) >> 2);
+    Ok(u16::from_le_bytes(value_bytes))
+}
+
+/// Read ARM AArch64 syscall
 fn read_aarch64_syscall(mut reader: impl Read) -> Result<u16> {
     /*
      * ARM Windows uses SVC instruction for syscalls and in contrast to
      * linux, it uses the exception number in an instruction for syscalls,
      * which requires us to use value mask on the instruction and then just
      * align the bits correcly.
+     *
+     * Example:
+     * svc {syscall_number}
      */
     let svc_instruction = consume!(reader, 4, "SVC instruction")?;
     let mut value_bytes = [0u8; 2];
-    value_bytes[0] = ((svc_instruction[1] & 0b11111) << 3) |
+    value_bytes[0] = ((svc_instruction[1] & 0b00011111) << 3) |
                      ((svc_instruction[0] & 0b11100000) >> 5);
     value_bytes[1] = ((svc_instruction[1] & 0b11100000) >> 5) |
-                     ((svc_instruction[2] & 0b11111) << 3);
+                     ((svc_instruction[2] & 0b00011111) << 3);
     Ok(u16::from_le_bytes(value_bytes))
 }
 
@@ -152,22 +219,26 @@ fn read_r4000_syscall(mut reader: impl Read) -> Result<u16> {
      * Windows uses little endian on every platform,
      * and MIPS encodes immediate instructions to have 16 byte immediate
      * operands.
+     *
+     * Example:
+     * addiu $zero, ${syscall_num}
+     * syscall
      */
-    Ok(typed_consume!(reader, u16, "Syscall number")?)
+    typed_consume!(reader, u16, "Syscall number")
 }
 
 /// Read x86 syscall for Windows 8 and higher
 fn read_x86_syscall(mut reader: impl Read) -> Result<u16> {
     /*
      * Windows 8 <= syscall functions are constructed in format
-     * mov r10, rcx ;; 3 byte instruction
+     * mov r10, rcx              ;; 3 byte instruction
      * mov eax, {syscall number} ;; 5 bytes instruction
      *
      * reading 4 bytes removes these unnecessary opcodes and leaves us
      * with 32 bit syscall number to read
      */
     let _opcodes = typed_consume!(reader, u32, "Useless opcodes")?;
-    Ok(typed_consume!(reader, u16, "Syscall number")?)
+    typed_consume!(reader, u16, "Syscall number")
 }
 
 /// Read x86 syscall for Windows XP and lower
@@ -179,7 +250,7 @@ fn read_old_syscall(mut reader: impl Read) -> Result<u16> {
      * for arguments and eax for syscall numbers.
      *
      * NtTerminateProcess:
-     * mov eax, 101h ;; 5 byte instruction
+     * mov eax, 101h             ;; 5 byte instruction
      * mov edx, KiFastSystemCall
      * call [edx]
      *
@@ -187,7 +258,7 @@ fn read_old_syscall(mut reader: impl Read) -> Result<u16> {
      * but this parsing format is basically the same
      */
     let _opcodes = consume!(reader, 1, "Useless opcodes")?;
-    Ok(typed_consume!(reader, u16, "Syscall number")?)
+    typed_consume!(reader, u16, "Syscall number")
 }
 
 /// Read syscalls from file at file_path.
@@ -466,6 +537,12 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
                 syscall_num = read_r4000_syscall(&mut reader)?;
             } else if let Machine::AArch64 = machine {
                 syscall_num = read_aarch64_syscall(&mut reader)?;
+            } else if let Machine::Alpha = machine {
+                syscall_num = read_alpha_syscall(&mut reader)?;
+            } else if let Machine::PowerPC = machine {
+                syscall_num = read_ppc_syscall(&mut reader)?;
+            } else if let Machine::Itanium = machine {
+                syscall_num = read_itanium_syscall(&mut reader)?;
             } else {
                 return Err(Error::InvalidCoffMachine(machine.try_into()?))
             }
