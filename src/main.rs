@@ -5,7 +5,6 @@ use std::fs::File;
 use std::path::Path;
 use std::mem::size_of;
 use std::collections::HashMap;
-use regex::Regex;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -173,7 +172,7 @@ fn read_itanium_syscall(mut reader: impl Read) -> Result<u16> {
     /*
      * Itanium is hella weird.
      * So because of weird instruction encoding and operand sizes we have to
-     * fuck around. 
+     * fuck around.
      * mov takes a 22 bit immediate which we want parse into sane 16 bit,
      * so we don't even have to read the whole bundle or even a whole slot.
      *
@@ -273,7 +272,7 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
               print_errors: bool) -> Result<()> {
     let mut reader =
         BufReader::new(File::open(file_path).map_err(Error::FileOpen)?);
-    
+
     if &consume!(reader, 2, "e_magic")? != DOS_MAGIC {
         return Err(Error::InvalidDosMagic);
     }
@@ -282,7 +281,7 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
     reader.seek(SeekFrom::Start(0x3c))
         .map_err(|x| Error::SeekErr("couldn't seek to e_lfanew", x))?;
 
-    let lfanew: u32 = 
+    let lfanew: u32 =
         <u32>::from_le_bytes(consume!(reader, 4, "e_lfanew")?);
 
     reader.seek(SeekFrom::Start(lfanew as u64))
@@ -510,13 +509,14 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
     let mut syscall_map: HashMap<String, u16> = HashMap::new();
 
     // Read exported names and match to syscall function naming format
-    let syscall_regex = Regex::new("^Nt[A-Z][[:alpha:]]+").unwrap();
     for i in 0..name_vec.len() {
         let name = &name_vec[i];
         let ord: usize = ord_vec[i].into();
         let fun: u64 = fun_vec[ord].into();
         let fun_off = fun - text_vaddr as u64 + text_off as u64;
-        if syscall_regex.is_match(name) {
+        if name[0..2].starts_with("Nt") && name.chars().nth(2).is_some()
+            && name.chars().nth(2).unwrap().is_ascii_uppercase()
+        {
             let syscall_num: u16;
             reader.seek(SeekFrom::Start(fun_off))
                 .map_err(Error::FileSeek)?;
