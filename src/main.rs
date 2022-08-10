@@ -30,6 +30,7 @@ const COFF_AARCH64_MACHINE: u16 = 0xAA64;
 const COFF_ITANIUM_MACHINE: u16 = 0x0200;
 const COFF_POWERPC_MACHINE: u16 = 0x01f0;
 const COFF_ALPHA_MACHINE: u16 = 0x0184;
+const COFF_THUMB2_MACHINE: u16  = 0x01c4;
 
 // const DATA_DIRECTORIES: usize = 16;
 
@@ -83,12 +84,12 @@ macro_rules! native_consume {
 enum Machine {
     X86,
     AMD64,
-    /// MIPSIII R4000
     R4000,
     AArch64,
     Alpha,
     PowerPC,
     Itanium,
+    Thumb2,
 }
 
 impl TryFrom<u16> for Machine {
@@ -102,6 +103,7 @@ impl TryFrom<u16> for Machine {
             COFF_POWERPC_MACHINE => Ok(Machine::PowerPC),
             COFF_ALPHA_MACHINE   => Ok(Machine::Alpha),
             COFF_ITANIUM_MACHINE => Ok(Machine::Itanium),
+            COFF_THUMB2_MACHINE  => Ok(Machine::Thumb2),
             _                    => Err(Error::InvalidCoffMachine(val)),
         }
     }
@@ -118,6 +120,7 @@ impl TryInto<u16> for Machine {
             Machine::Alpha   => Ok(COFF_ALPHA_MACHINE),
             Machine::PowerPC => Ok(COFF_POWERPC_MACHINE),
             Machine::Itanium => Ok(COFF_ITANIUM_MACHINE),
+            Machine::Thumb2  => Ok(COFF_THUMB2_MACHINE),
         }
     }
 }
@@ -141,6 +144,7 @@ impl TryFrom<Machine> for Bitness {
             Machine::Alpha   => Ok(Bitness::Bits32),
             Machine::PowerPC => Ok(Bitness::Bits32),
             Machine::X86     => Ok(Bitness::Bits32),
+            Machine::Thumb2  => Ok(Bitness::Bits32),
         }
     }
 }
@@ -192,23 +196,57 @@ fn read_itanium_syscall(mut reader: impl Read) -> Result<u16> {
     Ok(u16::from_le_bytes(value_bytes))
 }
 
-/// Read ARM AArch64 syscall
+#[allow(dead_code, unreachable_code, unused_parens, unused_mut, unused_variables)]
+/// Read Thumb2 syscall
+fn read_thumb2_syscall(mut reader: impl Read) -> Result<u16> {
+    /*
+     * There were not many releases of 32 bit ARM Windows although its
+     * syscall calling convention is similar to Linux. Thumb has
+     * variable sized instructions (either 32 or 16 bit, not as variable as x86).
+     * What I find a bit odd is that it uses either mov or movw which makes me
+     * parse both variants.
+     *
+     * Example:
+     * mov/movw r12, #0x33 ;; syscall number
+     * svc 0x1             ;; supervisor call
+     * bx lr               ;; return
+     *
+     * Instruction encoding for 12-bit immediate mov
+     *      (why Ghidra doesn't show mask bit for the sign??. This is 11 bits):
+     * 00000000 00000000 11111111 01110000
+     *
+     * Instruction encoding for 16-bit immediate movw:
+     * 00001111 00000100 11111111 01110000
+     */
+    unimplemented!("Thumb2 is not yet implemented!");
+    let mov_instruction = consume!(reader, 4, "MOV instruction")?;
+    let mut value_bytes = [0u8; 2];
+    if (mov_instruction[1] & 0b00000011) == 0b00000000 {
+    } else if ((mov_instruction[1] & 0b00000011) == 0b00000010) {
+    }
+    Ok(u16::from_le_bytes(value_bytes))
+}
+
+/// Read AArch64 syscall
 fn read_aarch64_syscall(mut reader: impl Read) -> Result<u16> {
     /*
-     * ARM Windows uses SVC instruction for syscalls and in contrast to
+     * AArch64 Windows uses SVC instruction for syscalls and in contrast to
      * linux, it uses the exception number in an instruction for syscalls,
      * which requires us to use value mask on the instruction and then just
      * align the bits correcly.
      *
      * Example:
      * svc {syscall_number}
+     *
+     * Immediate mask for little-endian values:
+     * 11100000 11111111 00011111 00000000
      */
     let svc_instruction = consume!(reader, 4, "SVC instruction")?;
     let mut value_bytes = [0u8; 2];
     value_bytes[0] = ((svc_instruction[1] & 0b00011111) << 3) |
                      ((svc_instruction[0] & 0b11100000) >> 5);
-    value_bytes[1] = ((svc_instruction[1] & 0b11100000) >> 5) |
-                     ((svc_instruction[2] & 0b00011111) << 3);
+    value_bytes[1] = ((svc_instruction[2] & 0b00011111) << 3) |
+                     ((svc_instruction[1] & 0b11100000) >> 5);
     Ok(u16::from_le_bytes(value_bytes))
 }
 
@@ -543,6 +581,8 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
                 syscall_num = read_ppc_syscall(&mut reader)?;
             } else if let Machine::Itanium = machine {
                 syscall_num = read_itanium_syscall(&mut reader)?;
+            } else if let Machine::Thumb2 = machine {
+                syscall_num = read_thumb2_syscall(&mut reader)?;
             } else {
                 return Err(Error::InvalidCoffMachine(machine.try_into()?))
             }
@@ -566,12 +606,12 @@ fn parse_syscalls(file_path: impl AsRef<Path>,
          * most likely doesn't follow the pattern described before.
          */
         if number.to_owned() >= 0x2000 {
-            println!("(likely erroneus) {} => {:#x}", name, number);
+            println!("(likely erroneus) {}: {:#x}", name, number);
         } else {
             if print_errors == true {
                 continue;
             }
-            println!("{} => {:#x}", name, number);
+            println!("{}: {:#x}", name, number);
         }
     }
 
